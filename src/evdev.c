@@ -137,6 +137,8 @@ static Atom prop_axis_label;
 static Atom prop_btn_label;
 static Atom prop_device;
 static Atom prop_virtual;
+static Atom prop_scroll_dist;
+static Atom float_type;
 
 /* All devices the evdev driver has allocated and knows about.
  * MAXDEVICES is safe as null-terminated array, as two devices (VCP and VCK)
@@ -1593,6 +1595,41 @@ out:
 }
 
 static int
+EvdevSetScrollValuators(DeviceIntPtr device)
+{
+    InputInfoPtr pInfo;
+    EvdevPtr pEvdev;
+    int axis;
+
+    pInfo = device->public.devicePrivate;
+    pEvdev = pInfo->private;
+
+    for (axis = REL_X; axis <= REL_MAX; axis++)
+    {
+        int axnum = pEvdev->rel_axis_map[axis];
+        if (axnum == -1)
+            continue;
+        
+#ifdef HAVE_SMOOTH_SCROLLING
+        if (axis == REL_WHEEL)
+            SetScrollValuator(device, axnum, SCROLL_TYPE_VERTICAL,
+                              -pEvdev->smoothScroll.vert_delta,
+                              SCROLL_FLAG_PREFERRED);
+        else if (axis == REL_DIAL)
+            SetScrollValuator(device, axnum, SCROLL_TYPE_VERTICAL,
+                              -pEvdev->smoothScroll.dial_delta,
+                              SCROLL_FLAG_NONE);
+        else if (axis == REL_HWHEEL)
+            SetScrollValuator(device, axnum, SCROLL_TYPE_HORIZONTAL,
+                              pEvdev->smoothScroll.horiz_delta,
+                              SCROLL_FLAG_NONE);
+#endif
+    }
+
+    return Success;
+}
+
+static int
 EvdevAddRelValuatorClass(DeviceIntPtr device)
 {
     InputInfoPtr pInfo;
@@ -1674,21 +1711,9 @@ EvdevAddRelValuatorClass(DeviceIntPtr device)
         xf86InitValuatorAxisStruct(device, axnum, atoms[axnum], -1, -1, 1, 0, 1,
                                    Relative);
         xf86InitValuatorDefaults(device, axnum);
-#ifdef HAVE_SMOOTH_SCROLLING
-        if (axis == REL_WHEEL)
-            SetScrollValuator(device, axnum, SCROLL_TYPE_VERTICAL,
-                              -pEvdev->smoothScroll.vert_delta,
-                              SCROLL_FLAG_PREFERRED);
-        else if (axis == REL_DIAL)
-            SetScrollValuator(device, axnum, SCROLL_TYPE_VERTICAL,
-                              -pEvdev->smoothScroll.dial_delta,
-                              SCROLL_FLAG_NONE);
-        else if (axis == REL_HWHEEL)
-            SetScrollValuator(device, axnum, SCROLL_TYPE_HORIZONTAL,
-                              pEvdev->smoothScroll.horiz_delta,
-                              SCROLL_FLAG_NONE);
-#endif
     }
+
+    EvdevSetScrollValuators(device);
 
     free(atoms);
 
@@ -2821,6 +2846,11 @@ EvdevInitProperty(DeviceIntPtr dev)
 
     CARD32       product[2];
 
+    float_type = XIGetKnownProperty(XATOM_FLOAT);
+    if (!float_type) {
+        float_type = MakeAtom(XATOM_FLOAT, strlen(XATOM_FLOAT), TRUE);
+    }
+
     prop_product_id = MakeAtom(XI_PROP_PRODUCT_ID, strlen(XI_PROP_PRODUCT_ID), TRUE);
     product[0] = pEvdev->id_vendor;
     product[1] = pEvdev->id_product;
@@ -2936,6 +2966,27 @@ EvdevInitProperty(DeviceIntPtr dev)
                                    PropModeReplace, pEvdev->num_buttons, atoms, FALSE);
             XISetDevicePropertyDeletable(dev, prop_btn_label, FALSE);
         }
+
+#ifdef HAVE_SMOOTH_SCROLLING
+        if (!float_type) {
+            xf86IDrvMsg(pInfo, X_WARNING,
+                        "evdev: Failed to init float atom, \"" EVDEV_PROP_SCROLL_DISTANCE
+                        "\" property is not available.\n");
+        }
+        else {
+            float values[] = {
+                pEvdev->smoothScroll.vert_delta,
+                pEvdev->smoothScroll.horiz_delta,
+                pEvdev->smoothScroll.dial_delta
+            };
+            prop_scroll_dist = MakeAtom(EVDEV_PROP_SCROLL_DISTANCE,
+                                        strlen(EVDEV_PROP_SCROLL_DISTANCE), TRUE);
+            XIChangeDeviceProperty(dev, prop_scroll_dist, float_type, 32,
+                                   PropModeReplace, 3, values, FALSE);
+            XISetDevicePropertyDeletable(dev, prop_scroll_dist, FALSE);
+        }
+#endif
+
     }
 
 }
@@ -2975,6 +3026,18 @@ EvdevSetProperty(DeviceIntPtr dev, Atom atom, XIPropertyValuePtr val,
 
         if (!checkonly)
             pEvdev->swap_axes = *((BOOL*)val->data);
+    } else if (atom == prop_scroll_dist)
+    {
+        if (val->format != 32 || val->type != float_type || val->size != 3)
+            return BadMatch;
+
+        if (!checkonly) {
+            float* data = (float *)val->data;
+            pEvdev->smoothScroll.vert_delta = data[0];
+            pEvdev->smoothScroll.horiz_delta = data[1];
+            pEvdev->smoothScroll.dial_delta = data[2];
+            EvdevSetScrollValuators(dev);
+        }
     } else if (atom == prop_axis_label || atom == prop_btn_label ||
                atom == prop_product_id || atom == prop_device ||
                atom == prop_virtual)
