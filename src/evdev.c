@@ -1506,7 +1506,8 @@ EvdevAddAbsValuatorClass(DeviceIntPtr device, int want_scroll_axes)
                                        NO_AXIS_LIMITS, NO_AXIS_LIMITS,
                                        0, 0, 0, Relative);
             SetScrollValuator(device, pEvdev->rel_axis_map[idx],
-                              SCROLL_TYPE_VERTICAL, -1.0,
+                              SCROLL_TYPE_VERTICAL,
+                              -pEvdev->smoothScroll.vert_delta,
                               SCROLL_FLAG_PREFERRED);
         }
 
@@ -1519,7 +1520,8 @@ EvdevAddAbsValuatorClass(DeviceIntPtr device, int want_scroll_axes)
                                        NO_AXIS_LIMITS, NO_AXIS_LIMITS,
                                        0, 0, 0, Relative);
             SetScrollValuator(device, pEvdev->rel_axis_map[idx],
-                              SCROLL_TYPE_HORIZONTAL, 1.0,
+                              SCROLL_TYPE_HORIZONTAL,
+                              pEvdev->smoothScroll.horiz_delta,
                               SCROLL_FLAG_NONE);
         }
 
@@ -1532,7 +1534,8 @@ EvdevAddAbsValuatorClass(DeviceIntPtr device, int want_scroll_axes)
                                        NO_AXIS_LIMITS, NO_AXIS_LIMITS,
                                        0, 0, 0, Relative);
             SetScrollValuator(device, pEvdev->rel_axis_map[idx],
-                              SCROLL_TYPE_VERTICAL, -1.0,
+                              SCROLL_TYPE_VERTICAL,
+                              -pEvdev->smoothScroll.dial_delta,
                               SCROLL_FLAG_NONE);
         }
     }
@@ -1673,11 +1676,17 @@ EvdevAddRelValuatorClass(DeviceIntPtr device)
         xf86InitValuatorDefaults(device, axnum);
 #ifdef HAVE_SMOOTH_SCROLLING
         if (axis == REL_WHEEL)
-            SetScrollValuator(device, axnum, SCROLL_TYPE_VERTICAL, -1.0, SCROLL_FLAG_PREFERRED);
+            SetScrollValuator(device, axnum, SCROLL_TYPE_VERTICAL,
+                              -pEvdev->smoothScroll.vert_delta,
+                              SCROLL_FLAG_PREFERRED);
         else if (axis == REL_DIAL)
-            SetScrollValuator(device, axnum, SCROLL_TYPE_VERTICAL, -1.0, SCROLL_FLAG_NONE);
+            SetScrollValuator(device, axnum, SCROLL_TYPE_VERTICAL,
+                              -pEvdev->smoothScroll.dial_delta,
+                              SCROLL_FLAG_NONE);
         else if (axis == REL_HWHEEL)
-            SetScrollValuator(device, axnum, SCROLL_TYPE_HORIZONTAL, 1.0, SCROLL_FLAG_NONE);
+            SetScrollValuator(device, axnum, SCROLL_TYPE_HORIZONTAL,
+                              pEvdev->smoothScroll.horiz_delta,
+                              SCROLL_FLAG_NONE);
 #endif
     }
 
@@ -2377,6 +2386,15 @@ EvdevProbe(InputInfoPtr pInfo)
         xf86IDrvMsg(pInfo, X_INFO, "Adding scrollwheel support\n");
         pEvdev->flags |= EVDEV_BUTTON_EVENTS;
         pEvdev->flags |= EVDEV_RELATIVE_EVENTS;
+
+#ifdef HAVE_SMOOTH_SCROLLING
+        pEvdev->smoothScroll.vert_delta =
+            xf86SetRealOption(pInfo->options, "VertScrollDelta", 1.0);
+        pEvdev->smoothScroll.horiz_delta =
+            xf86SetRealOption(pInfo->options, "HorizScrollDelta", 1.0);
+        pEvdev->smoothScroll.dial_delta =
+            xf86SetRealOption(pInfo->options, "DialDelta", 1.0);
+#endif
     }
 
 out:

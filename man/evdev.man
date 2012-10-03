@@ -220,6 +220,17 @@ is mapped to the negative Y axis motion and button number
 .I N2
 is mapped to the positive Y axis motion.  Default: "4 5". Property:
 "Evdev Wheel Emulation Axes".
+.TP 7
+.BI "Option \*qVertScrollDelta\*q \*q" "float" \*q
+The amount of motion considered one unit of scrolling vertically.
+Default: "1".
+.TP 7
+.BI "Option \*qHorizScrollDelta\*q \*q" "float" \*q
+The amount of motion considered one unit of scrolling horizontally.
+Default: "1".
+.TP 7
+.BI "Option \*qDialDelta\*q \*q" "float" \*q
+The amount of motion considered one unit of turning the dial.  Default: "1".
 
 .SH SUPPORTED PROPERTIES
 The following properties are provided by the

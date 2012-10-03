@@ -220,6 +220,11 @@ typedef struct {
         Time                expires;     /* time of expiry */
         Time                timeout;
     } emulateWheel;
+    struct {
+        float               vert_delta;
+        float               horiz_delta;
+        float               dial_delta;
+    } smoothScroll;
     /* run-time calibration */
     struct {
         int                 min_x;
