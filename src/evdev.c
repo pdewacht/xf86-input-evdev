@@ -53,6 +53,9 @@
 #include <X11/Xatom.h>
 #include <evdev-properties.h>
 #include <xserver-properties.h>
+#ifdef MULTITOUCH
+#include <mtdev-plumbing.h>
+#endif
 
 #ifndef XI_PROP_PRODUCT_ID
 #define XI_PROP_PRODUCT_ID "Device Product ID"
@@ -96,7 +99,7 @@
 
 static const char *evdevDefaults[] = {
     "XkbRules",     "evdev",
-    "XkbModel",     "evdev",
+    "XkbModel",     "pc104", /* the right model for 'us' */
     "XkbLayout",    "us",
     NULL
 };
@@ -782,7 +785,7 @@ EvdevProcessTouchEvent(InputInfoPtr pInfo, struct input_event *ev)
     EvdevPtr pEvdev = pInfo->private;
     int map;
 
-    if (!pEvdev->mtdev)
+    if (!pEvdev->mtdev && !EvdevBitIsSet(pEvdev->abs_bitmask, ABS_MT_SLOT))
         return;
 
     if (ev->code == ABS_MT_SLOT) {
@@ -1098,6 +1101,35 @@ EvdevFreeMasks(EvdevPtr pEvdev)
 #endif
 }
 
+static void
+EvdevProcessAllEvents(InputInfoPtr pInfo, struct input_event *ev, int nevents, size_t max_events)
+{
+    EvdevPtr pEvdev = pInfo->private;
+    int i, more_events_left = 0;
+
+    do {
+#ifdef MULTITOUCH
+        if (pEvdev->mtdev) {
+            int nmtevents = 0;
+            for (i = 0; i < nevents; i++)
+                mtdev_put_event(pEvdev->mtdev, &ev[i]);
+
+            while (!mtdev_empty(pEvdev->mtdev) && nmtevents < max_events)
+                mtdev_get_event(pEvdev->mtdev, &ev[nmtevents++]);
+
+            /* mtdev may have converted to more events than we have space for */
+            more_events_left = nmtevents >= max_events && !mtdev_empty(pEvdev->mtdev);
+            nevents = nmtevents;
+        }
+#endif
+
+        for (i = 0; i < nevents; i++)
+            EvdevProcessEvent(pInfo, &ev[i]);
+
+        nevents = 0;
+    } while(more_events_left);
+}
+
 /* just a magic number to reduce the number of reads */
 #define NUM_EVENTS 16
 
@@ -1105,19 +1137,11 @@ static void
 EvdevReadInput(InputInfoPtr pInfo)
 {
     struct input_event ev[NUM_EVENTS];
-    int i, len = sizeof(ev);
+    int len = sizeof(ev);
 
     while (len == sizeof(ev))
     {
-#ifdef MULTITOUCH
-        EvdevPtr pEvdev = pInfo->private;
-
-        if (pEvdev->mtdev)
-            len = mtdev_get(pEvdev->mtdev, pInfo->fd, ev, NUM_EVENTS) *
-                sizeof(struct input_event);
-        else
-#endif
-            len = read(pInfo->fd, &ev, sizeof(ev));
+        len = read(pInfo->fd, &ev, sizeof(ev));
 
         if (len <= 0)
         {
@@ -1136,8 +1160,8 @@ EvdevReadInput(InputInfoPtr pInfo)
             break;
         }
 
-        for (i = 0; i < len/sizeof(ev[0]); i++)
-            EvdevProcessEvent(pInfo, &ev[i]);
+        EvdevProcessAllEvents(pInfo, ev, len/sizeof(ev[0]), NUM_EVENTS);
+
     }
 }
 
@@ -1159,7 +1183,7 @@ EvdevKbdCtrl(DeviceIntPtr device, KeybdCtrl *ctrl)
     };
 
     InputInfoPtr pInfo;
-    struct input_event ev[ArrayLength(bits)];
+    struct input_event ev[ArrayLength(bits) + 1];
     int i;
 
     memset(ev, 0, sizeof(ev));
@@ -1170,6 +1194,10 @@ EvdevKbdCtrl(DeviceIntPtr device, KeybdCtrl *ctrl)
         ev[i].code = bits[i].code;
         ev[i].value = (ctrl->leds & bits[i].xbit) > 0;
     }
+
+    ev[i].type = EV_SYN;
+    ev[i].code = SYN_REPORT;
+    ev[i].value = 0;
 
     write(pInfo->fd, ev, sizeof ev);
 }
@@ -1269,7 +1297,7 @@ EvdevAddAbsValuatorClass(DeviceIntPtr device, int want_scroll_axes)
             for (j = 0; j < ArrayLength(mt_axis_mappings); j++)
             {
                 if (mt_axis_mappings[j].mt_code == axis &&
-                    BitIsOn(pEvdev->abs_bitmask, mt_axis_mappings[j].code))
+                    EvdevBitIsSet(pEvdev->abs_bitmask, mt_axis_mappings[j].code))
                 {
                     mt_axis_mappings[j].needs_mapping = TRUE;
                     skip = TRUE;
@@ -1285,6 +1313,15 @@ EvdevAddAbsValuatorClass(DeviceIntPtr device, int want_scroll_axes)
             num_axes--;
         }
     }
+
+    /* device only has mt-axes. the kernel should give us ABS_X etc for
+       backwards compat but some devices don't have it. */
+    if (num_axes == 0 && num_mt_axes > 0) {
+        xf86IDrvMsg(pInfo, X_ERROR,
+                    "found only multitouch-axes. That shouldn't happen.\n");
+        goto out;
+    }
+
 #endif
 
 #ifdef HAVE_SMOOTH_SCROLLING
@@ -1410,15 +1447,19 @@ EvdevAddAbsValuatorClass(DeviceIntPtr device, int want_scroll_axes)
     }
 
 #ifdef MULTITOUCH
-    if (pEvdev->mtdev && num_mt_axes_total > 0)
+    if (num_mt_axes_total > 0)
     {
         int num_touches = 0;
         int mode = pEvdev->flags & EVDEV_TOUCHPAD ?
             XIDependentTouch : XIDirectTouch;
 
-        if (pEvdev->mtdev->caps.slot.maximum > 0)
-            num_touches = pEvdev->mtdev->caps.slot.maximum -
-                          pEvdev->mtdev->caps.slot.minimum + 1;
+        if (pEvdev->mtdev) {
+            if (pEvdev->mtdev->caps.slot.maximum > 0)
+                num_touches = pEvdev->mtdev->caps.slot.maximum -
+                              pEvdev->mtdev->caps.slot.minimum + 1;
+        } else
+            num_touches = pEvdev->absinfo[ABS_MT_SLOT].maximum -
+                          pEvdev->absinfo[ABS_MT_SLOT].minimum + 1;
 
         if (!InitTouchClassDeviceStruct(device, num_touches, mode,
                                         num_mt_axes_total)) {
@@ -1430,10 +1471,11 @@ EvdevAddAbsValuatorClass(DeviceIntPtr device, int want_scroll_axes)
         for (i = 0; i < num_slots(pEvdev); i++) {
             for (axis = ABS_MT_TOUCH_MAJOR; axis < ABS_MAX; axis++) {
                 if (pEvdev->abs_axis_map[axis] >= 0) {
+                    int val = pEvdev->mtdev ? 0 : pEvdev->absinfo[axis].value;
                     /* XXX: read initial values from mtdev when it adds support
                      *      for doing so. */
                     valuator_mask_set(pEvdev->last_mt_vals[i],
-                                      pEvdev->abs_axis_map[axis], 0);
+                                      pEvdev->abs_axis_map[axis], val);
                 }
             }
         }
@@ -2008,12 +2050,10 @@ EvdevCache(InputInfoPtr pInfo)
     int i, len;
     struct input_id id;
 
-    char name[1024]                  = {0};
     unsigned long bitmask[NLONGS(EV_CNT)]      = {0};
     unsigned long key_bitmask[NLONGS(KEY_CNT)] = {0};
     unsigned long rel_bitmask[NLONGS(REL_CNT)] = {0};
     unsigned long abs_bitmask[NLONGS(ABS_CNT)] = {0};
-    unsigned long led_bitmask[NLONGS(LED_CNT)] = {0};
 
 
     if (ioctl(pInfo->fd, EVIOCGID, &id) < 0)
@@ -2024,13 +2064,6 @@ EvdevCache(InputInfoPtr pInfo)
 
     pEvdev->id_vendor = id.vendor;
     pEvdev->id_product = id.product;
-
-    if (ioctl(pInfo->fd, EVIOCGNAME(sizeof(name) - 1), name) < 0) {
-        xf86IDrvMsg(pInfo, X_ERROR, "ioctl EVIOCGNAME failed: %s\n", strerror(errno));
-        goto error;
-    }
-
-    strcpy(pEvdev->name, name);
 
     len = ioctl(pInfo->fd, EVIOCGBIT(0, sizeof(bitmask)), bitmask);
     if (len < 0) {
@@ -2058,15 +2091,6 @@ EvdevCache(InputInfoPtr pInfo)
     }
 
     memcpy(pEvdev->abs_bitmask, abs_bitmask, len);
-
-    len = ioctl(pInfo->fd, EVIOCGBIT(EV_LED, sizeof(led_bitmask)), led_bitmask);
-    if (len < 0) {
-        xf86IDrvMsg(pInfo, X_ERROR, "ioctl EVIOCGBIT for EV_LED failed: %s\n",
-                    strerror(errno));
-        goto error;
-    }
-
-    memcpy(pEvdev->led_bitmask, led_bitmask, len);
 
     /*
      * Do not try to validate absinfo data since it is not expected
@@ -2452,7 +2476,7 @@ EvdevSetCalibration(InputInfoPtr pInfo, int num_calibration, int calibration[4])
 #ifdef MULTITOUCH
 /**
  * Open an mtdev device for this device. mtdev is a bit too generous with
- * memory usage, so only do so for devices with multitouch bits set.
+ * memory usage, so only do so for multitouch protocol A devices.
  *
  * @return FALSE on error, TRUE if mtdev was initiated or the device doesn't
  * need it
@@ -2467,6 +2491,12 @@ EvdevOpenMTDev(InputInfoPtr pInfo)
 
     if (pEvdev->mtdev) {
         pEvdev->cur_slot = pEvdev->mtdev->caps.slot.value;
+        return TRUE;
+    } else if (EvdevBitIsSet(pEvdev->abs_bitmask, ABS_MT_SLOT)) {
+        struct input_absinfo abs;
+        len = ioctl(pInfo->fd, EVIOCGABS(ABS_MT_SLOT), &abs);
+        if (len != -1)
+            pEvdev->cur_slot = abs.value;
         return TRUE;
     }
 
@@ -2492,6 +2522,10 @@ EvdevOpenMTDev(InputInfoPtr pInfo)
                     __func__, strerror(errno));
         return FALSE;
     }
+
+    /* don't need mtdev for protocol B devices */
+    if (EvdevBitIsSet(abs_bitmask, ABS_MT_SLOT))
+        return TRUE;
 
     if (!EvdevBitIsSet(abs_bitmask, ABS_MT_POSITION_X) ||
         !EvdevBitIsSet(abs_bitmask, ABS_MT_POSITION_Y))
@@ -2591,6 +2625,9 @@ EvdevUnInit(InputDriverPtr drv, InputInfoPtr pInfo, int flags)
         /* Release string allocated in EvdevOpenDevice. */
         free(pEvdev->device);
         pEvdev->device = NULL;
+
+        free(pEvdev->type_name);
+        pEvdev->type_name = NULL;
     }
     xf86DeleteInput(pInfo, flags);
 }
@@ -2621,6 +2658,8 @@ EvdevAlloc(void)
 
     pEvdev->rel_axis_map[0] = 0;
     pEvdev->rel_axis_map[1] = 1;
+
+    pEvdev->type_name = NULL;
 
     return pEvdev;
 }
@@ -2665,6 +2704,14 @@ EvdevPreInit(InputDriverPtr drv, InputInfoPtr pInfo, int flags)
         rc = BadMatch;
         goto error;
     }
+
+    /* Overwrite type_name with custom-defined one (#62831).
+       Note: pInfo->type_name isn't freed so we need to manually do this
+     */
+    pEvdev->type_name = xf86SetStrOption(pInfo->options,
+                                         "TypeName",
+                                         pInfo->type_name);
+    pInfo->type_name = pEvdev->type_name;
 
     EvdevAddDevice(pInfo);
 
